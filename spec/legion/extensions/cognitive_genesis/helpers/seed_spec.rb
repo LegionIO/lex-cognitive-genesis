@@ -160,14 +160,14 @@ RSpec.describe Legion::Extensions::CognitiveGenesis::Helpers::Seed do
 
   describe '#to_h' do
     subject(:hash) do
-      described_class.new(**defaults, germination_potential: 0.5, novelty_score: 0.6, viability: 0.5).to_h
+      described_class.new(**defaults, germination_potential: 0.5, novelty_score: 0.5, viability: 0.5).to_h
     end
 
     it { expect(hash[:seed_id]).to match(/\A[0-9a-f-]{36}\z/) }
     it { expect(hash[:raw_material]).to eq(%w[light wave photon]) }
     it { expect(hash[:domain]).to eq(:abstract) }
     it { expect(hash[:germination_potential]).to eq(0.5) }
-    it { expect(hash[:novelty_score]).to eq(0.6) }
+    it { expect(hash[:novelty_score]).to eq(0.5) }
     it { expect(hash[:viability]).to eq(0.5) }
     it { expect(hash[:germination_label]).to eq(:awakening) }
     it { expect(hash[:novelty_label]).to eq(:emergent) }

@@ -28,12 +28,12 @@ RSpec.describe Legion::Extensions::CognitiveGenesis::Helpers::Concept do
     end
 
     it 'coerces domain to symbol' do
-      c = described_class.new(**defaults.merge(domain: 'emergent'))
+      c = described_class.new(**defaults, domain: 'emergent')
       expect(c.domain).to eq(:emergent)
     end
 
     it 'raises ArgumentError for invalid domain' do
-      expect { described_class.new(**defaults.merge(domain: :imaginary)) }
+      expect { described_class.new(**defaults, domain: :imaginary) }
         .to raise_error(ArgumentError, /invalid domain/)
     end
 

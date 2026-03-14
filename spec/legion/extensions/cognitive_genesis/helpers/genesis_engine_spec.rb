@@ -3,19 +3,11 @@
 RSpec.describe Legion::Extensions::CognitiveGenesis::Helpers::GenesisEngine do
   subject(:engine) { described_class.new }
 
-  let(:seed_a_id) do
-    engine.plant_seed(concept_type: :fusion, source_domains: %i[perception memory],
-                      novelty: 0.8, viability: 0.6)[:seed_id]
-  end
+  let(:consts) { Legion::Extensions::CognitiveGenesis::Helpers::Constants }
 
-  let(:seed_b_id) do
-    engine.plant_seed(concept_type: :abstraction, source_domains: %i[reasoning language],
-                      novelty: 0.75, viability: 0.65)[:seed_id]
-  end
-
-  let(:seed_c_id) do
-    engine.plant_seed(concept_type: :analogy, source_domains: %i[emotion social],
-                      novelty: 0.5, viability: 0.3)[:seed_id]
+  def plant_viable(eng, domain: :abstract, novelty: 0.8)
+    eng.plant(raw_material: %w[alpha beta gamma], domain: domain,
+              germination_potential: 0.9, novelty_score: novelty, viability: 0.6)
   end
 
   describe '#initialize' do
@@ -23,426 +15,325 @@ RSpec.describe Legion::Extensions::CognitiveGenesis::Helpers::GenesisEngine do
       expect(engine.seeds).to be_empty
     end
 
-    it 'starts with empty emergence_events' do
-      expect(engine.emergence_events).to be_empty
+    it 'starts with empty concepts' do
+      expect(engine.concepts).to be_empty
+    end
+
+    it 'starts with empty genesis_events' do
+      expect(engine.genesis_events).to be_empty
     end
   end
 
-  describe '#plant_seed' do
-    it 'returns success true' do
-      result = engine.plant_seed(concept_type: :fusion, source_domains: [:perception],
-                                 novelty: 0.8, viability: 0.6)
-      expect(result[:success]).to be true
-    end
-
-    it 'returns a seed_id' do
-      result = engine.plant_seed(concept_type: :fusion, source_domains: [:perception],
-                                 novelty: 0.8, viability: 0.6)
+  describe '#plant' do
+    it 'plants a seed successfully' do
+      result = engine.plant(raw_material: %w[one two], domain: :logical)
+      expect(result[:planted]).to be true
       expect(result[:seed_id]).to match(/\A[0-9a-f-]{36}\z/)
     end
 
-    it 'returns the concept_type' do
-      result = engine.plant_seed(concept_type: :mutation, source_domains: [:emotion],
-                                 novelty: 0.6, viability: 0.5)
-      expect(result[:concept_type]).to eq(:mutation)
+    it 'adds seed to seeds hash' do
+      result = engine.plant(raw_material: %w[one two], domain: :logical)
+      expect(engine.seeds).to have_key(result[:seed_id])
     end
 
-    it 'stores the seed in @seeds' do
-      result = engine.plant_seed(concept_type: :analogy, source_domains: [:language],
-                                 novelty: 0.7, viability: 0.6)
-      expect(engine.seeds[result[:seed_id]]).not_to be_nil
+    it 'respects MAX_SEEDS limit' do
+      consts::MAX_SEEDS.times { |i| engine.plant(raw_material: ["m_#{i}"], domain: :abstract) }
+      result = engine.plant(raw_material: %w[overflow], domain: :abstract)
+      expect(result[:planted]).to be false
+      expect(result[:reason]).to eq(:capacity_exceeded)
     end
 
-    it 'records an emergence event' do
-      expect { engine.plant_seed(concept_type: :fusion, source_domains: [:memory], novelty: 0.8, viability: 0.6) }
-        .to change(engine.emergence_events, :size).by(1)
+    it 'defaults germination_potential to DEFAULT_GERMINATION' do
+      result = engine.plant(raw_material: %w[a], domain: :spatial)
+      expect(engine.seeds[result[:seed_id]].germination_potential).to eq(consts::DEFAULT_GERMINATION)
     end
 
-    it 'returns an emergence_event_id' do
-      result = engine.plant_seed(concept_type: :transcendence, source_domains: [:imagination],
-                                 novelty: 0.95, viability: 0.9)
-      expect(result[:emergence_event_id]).to match(/\A[0-9a-f-]{36}\z/)
-    end
-
-    it 'propagates ArgumentError for unknown concept_type' do
-      expect do
-        engine.plant_seed(concept_type: :bad_type, source_domains: [:emotion], novelty: 0.5, viability: 0.5)
-      end.to raise_error(ArgumentError)
-    end
-
-    it 'prunes seeds when exceeding MAX_SEEDS' do
-      max = Legion::Extensions::CognitiveGenesis::Helpers::Constants::MAX_SEEDS
-      (max + 5).times do
-        engine.plant_seed(concept_type: :fusion, source_domains: [:memory],
-                          novelty: rand(0.1..0.9), viability: rand(0.1..0.9))
-      end
-      expect(engine.seeds.size).to be <= max
+    it 'includes seed hash in result' do
+      result = engine.plant(raw_material: %w[a], domain: :emergent)
+      expect(result[:seed]).to be_a(Hash)
+      expect(result[:seed][:domain]).to eq(:emergent)
     end
   end
 
-  describe '#synthesize' do
-    before { seed_a_id; seed_b_id }
-
-    it 'returns success true for valid seeds' do
-      result = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      expect(result[:success]).to be true
+  describe '#germinate' do
+    it 'returns not_found for unknown seed_id' do
+      result = engine.germinate(seed_id: 'none')
+      expect(result[:germinated]).to be false
+      expect(result[:reason]).to eq(:not_found)
     end
 
-    it 'creates a new seed with type :emergence' do
-      result    = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      new_seed  = engine.seeds[result[:seed_id]]
-      expect(new_seed.concept_type).to eq(:emergence)
+    it 'boosts germination_potential by GERMINATION_BOOST' do
+      planted = engine.plant(raw_material: %w[x], domain: :logical, germination_potential: 0.5)
+      engine.germinate(seed_id: planted[:seed_id])
+      expect(engine.seeds[planted[:seed_id]].germination_potential).to be_within(0.0001).of(0.6)
     end
 
-    it 'applies SYNTHESIS_BONUS to novelty' do
-      seed_a = engine.seeds[seed_a_id]
-      seed_b = engine.seeds[seed_b_id]
-      bonus  = Legion::Extensions::CognitiveGenesis::Helpers::Constants::SYNTHESIS_BONUS
-      avg    = (seed_a.novelty + seed_b.novelty) / 2.0
-      result = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      new_seed = engine.seeds[result[:seed_id]]
-      expect(new_seed.novelty).to be_within(0.001).of([avg + bonus, 1.0].min)
+    it 'accepts a custom boost' do
+      planted = engine.plant(raw_material: %w[x], domain: :logical, germination_potential: 0.4)
+      engine.germinate(seed_id: planted[:seed_id], boost: 0.2)
+      expect(engine.seeds[planted[:seed_id]].germination_potential).to be_within(0.0001).of(0.6)
     end
 
-    it 'applies SYNTHESIS_BONUS to viability' do
-      seed_a = engine.seeds[seed_a_id]
-      seed_b = engine.seeds[seed_b_id]
-      bonus  = Legion::Extensions::CognitiveGenesis::Helpers::Constants::SYNTHESIS_BONUS
-      avg    = (seed_a.viability + seed_b.viability) / 2.0
-      result = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      new_seed = engine.seeds[result[:seed_id]]
-      expect(new_seed.viability).to be_within(0.001).of([avg + bonus, 1.0].min)
+    it 'clamps potential at 1.0' do
+      planted = engine.plant(raw_material: %w[x], domain: :logical, germination_potential: 0.95)
+      engine.germinate(seed_id: planted[:seed_id], boost: 0.2)
+      expect(engine.seeds[planted[:seed_id]].germination_potential).to eq(1.0)
     end
 
-    it 'combines source_domains from parent seeds' do
-      result   = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      new_seed = engine.seeds[result[:seed_id]]
-      expect(new_seed.source_domains).to include(:perception, :memory, :reasoning, :language)
+    it 'returns label in result' do
+      planted = engine.plant(raw_material: %w[x], domain: :logical, germination_potential: 0.3)
+      result  = engine.germinate(seed_id: planted[:seed_id])
+      expect(result[:label]).to be_a(Symbol)
     end
 
-    it 'records parent_ids on the synthesized seed' do
-      result   = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      new_seed = engine.seeds[result[:seed_id]]
-      expect(new_seed.parent_ids).to include(seed_a_id, seed_b_id)
-    end
-
-    it 'returns parent_ids in the result hash' do
-      result = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      expect(result[:parent_ids]).to include(seed_a_id, seed_b_id)
-    end
-
-    it 'returns combined_domains in the result hash' do
-      result = engine.synthesize(seed_ids: [seed_a_id, seed_b_id])
-      expect(result[:combined_domains]).not_to be_empty
-    end
-
-    it 'fails with :insufficient_seeds when given only 1 seed id' do
-      result = engine.synthesize(seed_ids: [seed_a_id])
-      expect(result[:success]).to be false
-      expect(result[:error]).to eq(:insufficient_seeds)
-    end
-
-    it 'fails when seed ids do not exist' do
-      result = engine.synthesize(seed_ids: %w[nonexistent-1 nonexistent-2])
-      expect(result[:success]).to be false
-    end
-
-    it 'fails with :insufficient_seeds for empty array' do
-      result = engine.synthesize(seed_ids: [])
-      expect(result[:success]).to be false
-    end
-  end
-
-  describe '#mature_seed' do
-    before { seed_a_id }
-
-    it 'returns success true for existing seed' do
-      result = engine.mature_seed(seed_id: seed_a_id)
-      expect(result[:success]).to be true
-    end
-
-    it 'advances the maturity stage' do
-      engine.mature_seed(seed_id: seed_a_id)
-      expect(engine.seeds[seed_a_id].maturity_stage).to eq(:embryonic)
-    end
-
-    it 'returns previous_stage and current_stage' do
-      result = engine.mature_seed(seed_id: seed_a_id)
-      expect(result[:previous_stage]).to eq(:germinal)
-      expect(result[:current_stage]).to eq(:embryonic)
-    end
-
-    it 'returns updated viability' do
-      result = engine.mature_seed(seed_id: seed_a_id)
+    it 'recomputes viability after boost' do
+      planted = engine.plant(raw_material: %w[a b c d], domain: :logical, germination_potential: 0.3, novelty_score: 0.6)
+      result  = engine.germinate(seed_id: planted[:seed_id])
       expect(result[:viability]).to be_a(Float)
     end
-
-    it 'returns error for unknown seed_id' do
-      result = engine.mature_seed(seed_id: 'nonexistent')
-      expect(result[:success]).to be false
-      expect(result[:error]).to eq(:seed_not_found)
-    end
   end
 
-  describe '#decay_all!' do
-    before { seed_a_id; seed_b_id; seed_c_id }
+  describe '#birth' do
+    let(:viable_id) { plant_viable(engine)[:seed_id] }
 
-    it 'returns success true' do
-      expect(engine.decay_all![:success]).to be true
+    it 'births a concept from a ready seed' do
+      result = engine.birth(seed_id: viable_id, name: 'meta awareness', definition: 'awareness of awareness')
+      expect(result[:birthed]).to be true
+      expect(result[:concept_id]).to match(/\A[0-9a-f-]{36}\z/)
     end
 
-    it 'reduces novelty on all seeds' do
-      novelty_before = engine.seeds[seed_a_id].novelty
-      engine.decay_all!
-      expect(engine.seeds[seed_a_id].novelty).to be < novelty_before
+    it 'removes the seed after birth' do
+      engine.birth(seed_id: viable_id, name: 'test', definition: 'test')
+      expect(engine.seeds).not_to have_key(viable_id)
     end
 
-    it 'removes seeds with zero novelty and non-viable' do
-      result = engine.decay_all!
-      expect(result[:seeds_removed]).to be >= 0
-    end
-  end
-
-  describe '#viable_seeds' do
-    before { seed_a_id; seed_b_id; seed_c_id }
-
-    it 'returns success true' do
-      expect(engine.viable_seeds[:success]).to be true
+    it 'adds concept to concepts hash' do
+      result = engine.birth(seed_id: viable_id, name: 'born', definition: 'newly')
+      expect(engine.concepts).to have_key(result[:concept_id])
     end
 
-    it 'returns only seeds where viable? is true' do
-      result = engine.viable_seeds
-      result[:seeds].each do |s|
-        expect(s[:viable]).to be true
+    it 'records a genesis event' do
+      engine.birth(seed_id: viable_id, name: 'event', definition: 'recorded')
+      expect(engine.genesis_events.size).to eq(1)
+    end
+
+    it 'genesis event contains correct data' do
+      result = engine.birth(seed_id: viable_id, name: 'named', definition: 'desc')
+      event  = engine.genesis_events.first
+      expect(event[:concept_id]).to eq(result[:concept_id])
+      expect(event[:name]).to eq('named')
+      expect(event[:domain]).to eq(:abstract)
+    end
+
+    it 'returns not_found for unknown seed' do
+      result = engine.birth(seed_id: 'ghost', name: 'x', definition: 'y')
+      expect(result[:birthed]).to be false
+      expect(result[:reason]).to eq(:not_found)
+    end
+
+    it 'returns not_viable when viability is low' do
+      p = engine.plant(raw_material: %w[a], domain: :abstract, viability: 0.1, novelty_score: 0.9, germination_potential: 0.9)
+      expect(engine.birth(seed_id: p[:seed_id], name: 'x', definition: 'y')[:reason]).to eq(:not_viable)
+    end
+
+    it 'returns not_novel when novelty is low' do
+      p = engine.plant(raw_material: %w[a b c], domain: :abstract, viability: 0.6, novelty_score: 0.2, germination_potential: 0.9)
+      expect(engine.birth(seed_id: p[:seed_id], name: 'x', definition: 'y')[:reason]).to eq(:not_novel)
+    end
+
+    it 'returns not_ready when germination is low' do
+      p = engine.plant(raw_material: %w[a b c], domain: :abstract, viability: 0.6, novelty_score: 0.8, germination_potential: 0.5)
+      expect(engine.birth(seed_id: p[:seed_id], name: 'x', definition: 'y')[:reason]).to eq(:not_ready)
+    end
+
+    it 'respects MAX_CONCEPTS limit' do
+      consts::MAX_CONCEPTS.times do |i|
+        sid = plant_viable(engine)[:seed_id]
+        engine.birth(seed_id: sid, name: "c#{i}", definition: "d#{i}")
       end
-    end
-
-    it 'includes count' do
-      result = engine.viable_seeds
-      expect(result[:count]).to eq(result[:seeds].size)
+      sid = plant_viable(engine)[:seed_id]
+      expect(engine.birth(seed_id: sid, name: 'overflow', definition: 'x')[:reason]).to eq(:concept_capacity_exceeded)
     end
   end
 
-  describe '#novel_seeds' do
-    before { seed_a_id; seed_b_id; seed_c_id }
-
-    it 'returns success true' do
-      expect(engine.novel_seeds[:success]).to be true
+  describe '#nurture' do
+    it 'returns not_found for unknown concept' do
+      expect(engine.nurture(concept_id: 'ghost')[:reason]).to eq(:not_found)
     end
 
-    it 'returns only seeds where novel? is true' do
-      result = engine.novel_seeds
-      result[:seeds].each do |s|
-        expect(s[:novel]).to be true
-      end
-    end
-  end
-
-  describe '#truly_novel_seeds' do
-    before do
-      # Plant a truly novel seed (no parents, high novelty)
-      engine.plant_seed(concept_type: :transcendence, source_domains: [:imagination],
-                        novelty: 0.95, viability: 0.8)
-      # Plant a derived seed with parent
-      parent_id = engine.plant_seed(concept_type: :fusion, source_domains: [:memory],
-                                    novelty: 0.9, viability: 0.7)[:seed_id]
-      engine.plant_seed(concept_type: :mutation, source_domains: [:language],
-                        novelty: 0.9, viability: 0.6, parent_ids: [parent_id])
-    end
-
-    it 'returns seeds that are novel AND have no parent_ids' do
-      result = engine.truly_novel_seeds
-      result[:seeds].each do |s|
-        expect(s[:truly_novel]).to be true
-        expect(s[:parent_ids]).to be_empty
-      end
+    it 'increases maturity' do
+      sid    = plant_viable(engine)[:seed_id]
+      cid    = engine.birth(seed_id: sid, name: 'n', definition: 'd')[:concept_id]
+      before = engine.concepts[cid].maturity
+      engine.nurture(concept_id: cid)
+      expect(engine.concepts[cid].maturity).to be > before
     end
   end
 
-  describe '#seeds_by_type' do
-    before { seed_a_id; seed_b_id }
-
-    it 'returns success true' do
-      expect(engine.seeds_by_type[:success]).to be true
+  describe '#prune' do
+    it 'removes a seed and returns pruned: true' do
+      p = engine.plant(raw_material: %w[x], domain: :logical)
+      expect(engine.prune(seed_id: p[:seed_id])[:pruned]).to be true
+      expect(engine.seeds).not_to have_key(p[:seed_id])
     end
 
-    it 'groups seeds by concept_type' do
-      result = engine.seeds_by_type
-      expect(result[:by_type]).to have_key(:fusion)
-      expect(result[:by_type]).to have_key(:abstraction)
+    it 'returns not_found for unknown seed' do
+      expect(engine.prune(seed_id: 'ghost')[:reason]).to eq(:not_found)
     end
   end
 
-  describe '#seeds_by_stage' do
-    before { seed_a_id }
+  describe '#cross_pollinate' do
+    let(:a_id) { engine.plant(raw_material: %w[red circle], domain: :spatial, novelty_score: 0.6)[:seed_id] }
+    let(:b_id) { engine.plant(raw_material: %w[blue triangle], domain: :aesthetic, novelty_score: 0.7)[:seed_id] }
 
-    it 'returns success true' do
-      expect(engine.seeds_by_stage[:success]).to be true
+    it 'creates a new seed' do
+      result = engine.cross_pollinate(seed_id_a: a_id, seed_id_b: b_id)
+      expect(result[:cross_pollinated]).to be true
+      expect(result[:seed_id]).to match(/\A[0-9a-f-]{36}\z/)
     end
 
-    it 'groups seeds by maturity_stage' do
-      result = engine.seeds_by_stage
-      expect(result[:by_stage]).to have_key(:germinal)
-    end
-  end
-
-  describe '#seeds_by_domain' do
-    before { seed_a_id; seed_b_id }
-
-    it 'returns success true' do
-      expect(engine.seeds_by_domain[:success]).to be true
+    it 'combines raw materials without duplicates' do
+      result = engine.cross_pollinate(seed_id_a: a_id, seed_id_b: b_id)
+      child  = engine.seeds[result[:seed_id]]
+      expect(child.raw_material).to include('red', 'blue', 'circle', 'triangle')
     end
 
-    it 'groups seeds by each source domain they belong to' do
-      result = engine.seeds_by_domain
-      expect(result[:by_domain]).to have_key(:perception)
-      expect(result[:by_domain]).to have_key(:reasoning)
+    it 'includes parent_seed_ids' do
+      result = engine.cross_pollinate(seed_id_a: a_id, seed_id_b: b_id)
+      expect(result[:parent_seed_ids]).to eq([a_id, b_id])
     end
 
-    it 'allows a seed to appear in multiple domains' do
-      # seed_a has both :perception and :memory
-      result = engine.seeds_by_domain[:by_domain]
-      perception_ids = result[:perception]&.map { |s| s[:id] } || []
-      memory_ids     = result[:memory]&.map { |s| s[:id] } || []
-      expect(perception_ids).to include(seed_a_id)
-      expect(memory_ids).to include(seed_a_id)
-    end
-  end
-
-  describe '#most_novel' do
-    before { seed_a_id; seed_b_id; seed_c_id }
-
-    it 'returns success true' do
-      expect(engine.most_novel[:success]).to be true
+    it 'returns seed_a_not_found for unknown A' do
+      expect(engine.cross_pollinate(seed_id_a: 'ghost', seed_id_b: b_id)[:reason]).to eq(:seed_a_not_found)
     end
 
-    it 'returns seeds sorted by novelty descending' do
-      result   = engine.most_novel(limit: 10)
-      novelties = result[:seeds].map { |s| s[:novelty] }
-      expect(novelties).to eq(novelties.sort.reverse)
+    it 'returns seed_b_not_found for unknown B' do
+      expect(engine.cross_pollinate(seed_id_a: a_id, seed_id_b: 'ghost')[:reason]).to eq(:seed_b_not_found)
     end
 
-    it 'respects the limit parameter' do
-      result = engine.most_novel(limit: 2)
-      expect(result[:seeds].size).to be <= 2
+    it 'child novelty is at least max parent novelty' do
+      result = engine.cross_pollinate(seed_id_a: a_id, seed_id_b: b_id)
+      expect(engine.seeds[result[:seed_id]].novelty_score).to be >= 0.7
     end
   end
 
-  describe '#emergence_rate' do
-    it 'returns rate 0.0 with no seeds or events' do
-      expect(engine.emergence_rate[:rate]).to eq(0.0)
+  describe '#adopt_concept' do
+    it 'increments count and updates utility' do
+      sid    = plant_viable(engine)[:seed_id]
+      cid    = engine.birth(seed_id: sid, name: 'adoptable', definition: 'ready')[:concept_id]
+      result = engine.adopt_concept(concept_id: cid)
+      expect(result[:adopted]).to be true
+      expect(result[:adoption_count]).to eq(1)
     end
 
-    it 'returns counts of strong and weak events' do
-      engine.plant_seed(concept_type: :transcendence, source_domains: [:imagination],
-                        novelty: 0.95, viability: 0.9)
-      engine.plant_seed(concept_type: :fusion, source_domains: [:language],
-                        novelty: 0.1, viability: 0.1)
-      result = engine.emergence_rate
-      expect(result[:total_events]).to eq(2)
-      expect(result).to have_key(:strong_events)
-      expect(result).to have_key(:weak_events)
+    it 'returns not_found for unknown concept' do
+      expect(engine.adopt_concept(concept_id: 'ghost')[:adopted]).to be false
     end
   end
 
-  describe '#average_novelty' do
-    it 'returns 0.0 when no seeds' do
-      expect(engine.average_novelty[:average]).to eq(0.0)
+  describe '#concept_fitness' do
+    it 'returns fitness data' do
+      sid    = plant_viable(engine)[:seed_id]
+      cid    = engine.birth(seed_id: sid, name: 'fit', definition: 'tested')[:concept_id]
+      result = engine.concept_fitness(concept_id: cid)
+      expect(result[:found]).to be true
+      expect(result[:fitness_label]).to be_a(Symbol)
     end
 
-    it 'computes correct average' do
-      engine.plant_seed(concept_type: :fusion, source_domains: [:memory], novelty: 0.6, viability: 0.5)
-      engine.plant_seed(concept_type: :analogy, source_domains: [:language], novelty: 0.8, viability: 0.6)
-      result = engine.average_novelty
-      expect(result[:average]).to be_within(0.001).of(0.7)
-      expect(result[:count]).to eq(2)
-    end
-  end
-
-  describe '#average_viability' do
-    it 'returns 0.0 when no seeds' do
-      expect(engine.average_viability[:average]).to eq(0.0)
-    end
-
-    it 'computes correct average' do
-      engine.plant_seed(concept_type: :fusion, source_domains: [:memory], novelty: 0.6, viability: 0.4)
-      engine.plant_seed(concept_type: :analogy, source_domains: [:language], novelty: 0.7, viability: 0.8)
-      result = engine.average_viability
-      expect(result[:average]).to be_within(0.001).of(0.6)
+    it 'returns found: false for unknown' do
+      expect(engine.concept_fitness(concept_id: 'ghost')[:found]).to be false
     end
   end
 
-  describe '#novelty_distribution' do
-    before { seed_a_id; seed_b_id; seed_c_id }
-
-    it 'returns success true' do
-      expect(engine.novelty_distribution[:success]).to be true
+  describe '#novelty_landscape' do
+    it 'returns empty landscape initially' do
+      landscape = engine.novelty_landscape
+      expect(landscape[:seeds]).to be_empty
+      expect(landscape[:concepts]).to be_empty
     end
 
-    it 'includes distribution hash with novelty labels' do
-      result = engine.novelty_distribution
-      expect(result[:distribution]).to be_a(Hash)
-      expect(result[:distribution].keys).to include(:highly_novel)
+    it 'includes seeds with novelty scores' do
+      engine.plant(raw_material: %w[a], domain: :abstract, novelty_score: 0.6)
+      expect(engine.novelty_landscape[:seeds].first[:score]).to eq(0.6)
     end
 
-    it 'reports total matching seed count' do
-      result = engine.novelty_distribution
-      expect(result[:total]).to eq(engine.seeds.size)
+    it 'counts high_novelty_seeds' do
+      engine.plant(raw_material: %w[a], domain: :abstract, novelty_score: 0.8)
+      engine.plant(raw_material: %w[b], domain: :logical, novelty_score: 0.3)
+      expect(engine.novelty_landscape[:high_novelty_seeds]).to eq(1)
+    end
+  end
+
+  describe '#genesis_rate' do
+    it 'returns 0.0 with no events' do
+      result = engine.genesis_rate
+      expect(result[:rate]).to eq(0.0)
+      expect(result[:total_events]).to eq(0)
+    end
+
+    it 'returns positive rate after birthing' do
+      sid = plant_viable(engine)[:seed_id]
+      engine.birth(seed_id: sid, name: 'born', definition: 'just born')
+      expect(engine.genesis_rate[:rate]).to be > 0.0
+    end
+  end
+
+  describe '#most_adopted' do
+    it 'returns nil with no concepts' do
+      expect(engine.most_adopted).to be_nil
+    end
+
+    it 'returns concept with highest adoption' do
+      sid_a = plant_viable(engine)[:seed_id]
+      cid_a = engine.birth(seed_id: sid_a, name: 'popular', definition: 'widely used')[:concept_id]
+      sid_b = plant_viable(engine)[:seed_id]
+      engine.birth(seed_id: sid_b, name: 'obscure', definition: 'rarely used')
+      engine.adopt_concept(concept_id: cid_a)
+      engine.adopt_concept(concept_id: cid_a)
+      expect(engine.most_adopted[:name]).to eq('popular')
+    end
+  end
+
+  describe '#orphan_concepts' do
+    it 'returns empty with no concepts' do
+      expect(engine.orphan_concepts).to be_empty
+    end
+
+    it 'returns unadopted concepts' do
+      sid = plant_viable(engine)[:seed_id]
+      engine.birth(seed_id: sid, name: 'lonely', definition: 'never used')
+      expect(engine.orphan_concepts.size).to eq(1)
+    end
+
+    it 'excludes adopted concepts' do
+      sid = plant_viable(engine)[:seed_id]
+      cid = engine.birth(seed_id: sid, name: 'adopted', definition: 'used')[:concept_id]
+      engine.adopt_concept(concept_id: cid)
+      expect(engine.orphan_concepts).to be_empty
     end
   end
 
   describe '#genesis_report' do
-    before { seed_a_id; seed_b_id; seed_c_id }
-
-    it 'returns success true' do
-      expect(engine.genesis_report[:success]).to be true
+    it 'returns all expected keys' do
+      report = engine.genesis_report
+      %i[seeds concepts genesis_events genesis_rate orphan_count most_adopted
+         avg_seed_novelty avg_concept_maturity domains_active].each do |key|
+        expect(report).to have_key(key)
+      end
     end
 
-    it 'includes total_seeds' do
-      expect(engine.genesis_report[:total_seeds]).to eq(3)
+    it 'reflects current seed count' do
+      engine.plant(raw_material: %w[x], domain: :abstract)
+      expect(engine.genesis_report[:seeds]).to eq(1)
     end
 
-    it 'includes viable_count' do
-      result = engine.genesis_report
-      expect(result[:viable_count]).to be_a(Integer)
-    end
-
-    it 'includes novel_count' do
-      expect(engine.genesis_report[:novel_count]).to be_a(Integer)
-    end
-
-    it 'includes truly_novel_count' do
-      expect(engine.genesis_report[:truly_novel_count]).to be_a(Integer)
-    end
-
-    it 'includes crystallized_count' do
-      expect(engine.genesis_report[:crystallized_count]).to be_a(Integer)
-    end
-
-    it 'includes average_novelty' do
-      expect(engine.genesis_report[:average_novelty]).to be_a(Float)
-    end
-
-    it 'includes average_viability' do
-      expect(engine.genesis_report[:average_viability]).to be_a(Float)
-    end
-
-    it 'includes emergence_events count' do
-      expect(engine.genesis_report[:emergence_events]).to eq(engine.emergence_events.size)
-    end
-
-    it 'includes fertility_score' do
-      expect(engine.genesis_report[:fertility_score]).to be_a(Float)
-    end
-
-    it 'includes fertility_label' do
-      expect(engine.genesis_report[:fertility_label]).to be_a(Symbol)
-    end
-
-    it 'includes seeds_by_type breakdown' do
-      result = engine.genesis_report[:seeds_by_type]
-      expect(result).to be_a(Hash)
-      expect(result.values.sum).to eq(3)
+    it 'includes domain tally' do
+      engine.plant(raw_material: %w[a], domain: :abstract)
+      engine.plant(raw_material: %w[b], domain: :abstract)
+      engine.plant(raw_material: %w[c], domain: :logical)
+      report = engine.genesis_report
+      expect(report[:domains_active][:abstract]).to eq(2)
+      expect(report[:domains_active][:logical]).to eq(1)
     end
   end
 end

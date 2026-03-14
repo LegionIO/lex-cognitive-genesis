@@ -7,207 +7,238 @@ module Legion
         class GenesisEngine
           include Constants
 
-          attr_reader :seeds, :emergence_events
+          attr_reader :seeds, :concepts, :genesis_events
 
           def initialize
-            @seeds            = {}
-            @emergence_events = []
+            @seeds          = {}
+            @concepts       = {}
+            @genesis_events = []
           end
 
-          def plant_seed(concept_type:, source_domains:, novelty: DEFAULT_NOVELTY,
-                         viability: DEFAULT_NOVELTY, parent_ids: [], **)
-            seed = ConceptSeed.new(
-              concept_type:   concept_type,
-              source_domains: source_domains,
-              novelty:        novelty,
-              viability:      viability,
-              parent_ids:     parent_ids
+          def plant(raw_material:, domain:, germination_potential: DEFAULT_GERMINATION,
+                    novelty_score: 0.0, viability: 0.0, **)
+            return { planted: false, reason: :capacity_exceeded } if @seeds.size >= MAX_SEEDS
+
+            seed = Seed.new(
+              raw_material:          raw_material,
+              domain:                domain,
+              germination_potential: germination_potential,
+              novelty_score:         novelty_score,
+              viability:             viability
             )
-
-            @seeds[seed.id] = seed
-            prune_seeds! if @seeds.size > MAX_SEEDS
-
-            strength = (seed.novelty * 0.6 + seed.viability * 0.4).round(10)
-            event    = record_emergence(seed: seed, trigger_domains: source_domains,
-                                        emergence_strength: strength)
-
-            Legion::Logging.debug "[cognitive_genesis] seed planted id=#{seed.id[0..7]} " \
-                                  "type=#{concept_type} novelty=#{novelty.round(2)} " \
-                                  "viability=#{viability.round(2)}"
-
-            { success: true, seed_id: seed.id, concept_type: concept_type,
-              emergence_event_id: event.id }
+            @seeds[seed.seed_id] = seed
+            Legion::Logging.debug "[cognitive_genesis] planted seed #{seed.seed_id[0..7]} " \
+                                  "domain=#{domain} novelty=#{novelty_score.round(3)}"
+            { planted: true, seed_id: seed.seed_id, seed: seed.to_h }
           end
 
-          def synthesize(seed_ids:, **)
-            seeds_to_combine = Array(seed_ids).map { |sid| @seeds[sid] }.compact
-
-            if seeds_to_combine.size < 2
-              Legion::Logging.debug '[cognitive_genesis] synthesize failed: need at least 2 seeds'
-              return { success: false, error: :insufficient_seeds,
-                       provided: seeds_to_combine.size, required: 2 }
-            end
-
-            combined_domains = seeds_to_combine.flat_map(&:source_domains).uniq
-            base_novelty     = seeds_to_combine.sum(&:novelty).round(10) / seeds_to_combine.size
-            base_viability   = seeds_to_combine.sum(&:viability).round(10) / seeds_to_combine.size
-            synth_novelty    = (base_novelty + SYNTHESIS_BONUS).round(10).clamp(0.0, 1.0)
-            synth_viability  = (base_viability + SYNTHESIS_BONUS).round(10).clamp(0.0, 1.0)
-            parent_ids       = seeds_to_combine.map(&:id)
-
-            result = plant_seed(
-              concept_type:   :emergence,
-              source_domains: combined_domains,
-              novelty:        synth_novelty,
-              viability:      synth_viability,
-              parent_ids:     parent_ids
-            )
-
-            Legion::Logging.info "[cognitive_genesis] synthesis complete parent_count=#{parent_ids.size} " \
-                                 "new_seed=#{result[:seed_id]&.slice(0, 7)} novelty=#{synth_novelty.round(2)}"
-
-            result.merge(parent_ids: parent_ids, combined_domains: combined_domains)
-          end
-
-          def mature_seed(seed_id:, **)
+          def germinate(seed_id:, boost: GERMINATION_BOOST, **)
             seed = @seeds[seed_id]
-            return { success: false, error: :seed_not_found } unless seed
+            return { germinated: false, reason: :not_found } unless seed
 
-            prev_stage = seed.maturity_stage
-            seed.mature!
+            seed.germination_potential = (seed.germination_potential + boost).clamp(0.0, 1.0).round(10)
+            seed.viability             = compute_viability(seed)
 
-            Legion::Logging.debug "[cognitive_genesis] seed matured id=#{seed_id[0..7]} " \
-                                  "#{prev_stage} -> #{seed.maturity_stage} viability=#{seed.viability.round(2)}"
-
-            { success: true, seed_id: seed_id,
-              previous_stage: prev_stage, current_stage: seed.maturity_stage,
-              viability: seed.viability.round(6) }
+            Legion::Logging.debug "[cognitive_genesis] germinated #{seed_id[0..7]} " \
+                                  "potential=#{seed.germination_potential.round(3)}"
+            { germinated: true, seed_id: seed_id,
+              germination_potential: seed.germination_potential,
+              viability:             seed.viability,
+              label:                 seed.germination_label }
           end
 
-          def decay_all!
-            @seeds.each_value(&:decay!)
-            before = @seeds.size
-            @seeds.reject! { |_, s| s.novelty <= 0.0 && !s.viable? }
-            removed = before - @seeds.size
+          def birth(seed_id:, name:, definition:, **)
+            seed = @seeds[seed_id]
+            return { birthed: false, reason: :not_found } unless seed
+            return { birthed: false, reason: :not_viable }  unless seed.viable?
+            return { birthed: false, reason: :not_novel }   unless seed.novel?
+            return { birthed: false, reason: :not_ready }   unless seed.ready_to_birth?
+            return { birthed: false, reason: :concept_capacity_exceeded } if @concepts.size >= MAX_CONCEPTS
 
-            Legion::Logging.debug "[cognitive_genesis] decay_all! removed=#{removed} remaining=#{@seeds.size}"
-            { success: true, seeds_decayed: @seeds.size, seeds_removed: removed }
+            concept = Concept.new(
+              name:           name,
+              definition:     definition,
+              parent_seed_id: seed_id,
+              domain:         seed.domain
+            )
+            @concepts[concept.concept_id] = concept
+            @seeds.delete(seed_id)
+            record_genesis_event(concept: concept, seed: seed)
+
+            Legion::Logging.info "[cognitive_genesis] concept born: \"#{name}\" " \
+                                 "(#{concept.concept_id[0..7]}) domain=#{seed.domain}"
+            { birthed: true, concept_id: concept.concept_id, concept: concept.to_h }
           end
 
-          def viable_seeds(**)
-            result = @seeds.values.select(&:viable?)
-            { success: true, seeds: result.map(&:to_h), count: result.size }
+          def nurture(concept_id:, boost: MATURITY_BOOST, **)
+            concept = @concepts[concept_id]
+            return { nurtured: false, reason: :not_found } unless concept
+
+            concept.nurture!(boost: boost)
+            Legion::Logging.debug "[cognitive_genesis] nurtured #{concept_id[0..7]} " \
+                                  "maturity=#{concept.maturity.round(3)}"
+            { nurtured: true, concept_id: concept_id,
+              maturity: concept.maturity, label: concept.maturity_label }
           end
 
-          def novel_seeds(**)
-            result = @seeds.values.select(&:novel?)
-            { success: true, seeds: result.map(&:to_h), count: result.size }
+          def prune(seed_id:, **)
+            seed = @seeds.delete(seed_id)
+            return { pruned: false, reason: :not_found } unless seed
+
+            Legion::Logging.debug "[cognitive_genesis] pruned seed #{seed_id[0..7]}"
+            { pruned: true, seed_id: seed_id }
           end
 
-          def truly_novel_seeds(**)
-            result = @seeds.values.select(&:truly_novel?)
-            { success: true, seeds: result.map(&:to_h), count: result.size }
+          def cross_pollinate(seed_id_a:, seed_id_b:, **)
+            guard = cross_pollinate_guard(seed_id_a, seed_id_b)
+            return guard if guard
+
+            seed_a         = @seeds[seed_id_a]
+            seed_b         = @seeds[seed_id_b]
+            child_novelty  = cross_novelty(seed_a.novelty_score, seed_b.novelty_score)
+            result         = plant_cross_child(seed_a, seed_b, child_novelty)
+
+            Legion::Logging.debug '[cognitive_genesis] cross_pollinated ' \
+                                  "#{seed_id_a[0..7]}+#{seed_id_b[0..7]} -> #{result[:seed_id]&.slice(0, 8)}"
+            result.merge(cross_pollinated: true, parent_seed_ids: [seed_id_a, seed_id_b])
           end
 
-          def seeds_by_type(**)
-            grouped = @seeds.values.group_by(&:concept_type)
-            { success: true, by_type: grouped.transform_values { |s| s.map(&:to_h) } }
+          def adopt_concept(concept_id:, **)
+            concept = @concepts[concept_id]
+            return { adopted: false, reason: :not_found } unless concept
+
+            concept.adopt!
+            Legion::Logging.debug "[cognitive_genesis] adopted #{concept_id[0..7]} " \
+                                  "count=#{concept.adoption_count}"
+            { adopted: true, concept_id: concept_id,
+              adoption_count: concept.adoption_count,
+              utility_score:  concept.utility_score,
+              maturity:       concept.maturity }
           end
 
-          def seeds_by_stage(**)
-            grouped = @seeds.values.group_by(&:maturity_stage)
-            { success: true, by_stage: grouped.transform_values { |s| s.map(&:to_h) } }
+          def concept_fitness(concept_id:, **)
+            concept = @concepts[concept_id]
+            return { found: false } unless concept
+
+            { found:          true,
+              concept_id:     concept_id,
+              utility_score:  concept.utility_score,
+              fitness_label:  concept.fitness_label,
+              adoption_count: concept.adoption_count,
+              maturity:       concept.maturity }
           end
 
-          def seeds_by_domain(**)
-            result = {}
-            @seeds.each_value do |seed|
-              seed.source_domains.each do |domain|
-                result[domain] ||= []
-                result[domain] << seed.to_h
-              end
+          def novelty_landscape(**)
+            seeds_map = @seeds.values.map do |s|
+              { id: s.seed_id, type: :seed, score: s.novelty_score,
+                label: s.novelty_label, domain: s.domain }
             end
-            { success: true, by_domain: result }
-          end
-
-          def most_novel(limit: 10, **)
-            top = @seeds.values.sort_by { |s| -s.novelty }.first(limit)
-            { success: true, seeds: top.map(&:to_h), count: top.size }
-          end
-
-          def emergence_rate(**)
-            total  = @emergence_events.size
-            strong = @emergence_events.count(&:strong?)
-            weak   = @emergence_events.count(&:weak?)
-            rate   = @seeds.empty? ? 0.0 : (total.to_f / @seeds.size).round(10)
-            { success: true, total_events: total, strong_events: strong,
-              weak_events: weak, rate: rate.round(6) }
-          end
-
-          def average_novelty(**)
-            return { success: true, average: 0.0, count: 0 } if @seeds.empty?
-
-            avg = (@seeds.values.sum(&:novelty).round(10) / @seeds.size).round(10)
-            { success: true, average: avg.round(6), count: @seeds.size }
-          end
-
-          def average_viability(**)
-            return { success: true, average: 0.0, count: 0 } if @seeds.empty?
-
-            avg = (@seeds.values.sum(&:viability).round(10) / @seeds.size).round(10)
-            { success: true, average: avg.round(6), count: @seeds.size }
-          end
-
-          def novelty_distribution(**)
-            dist = NOVELTY_LABELS.each_with_object({}) do |(range, label), acc|
-              acc[label] = @seeds.values.count { |s| range.cover?(s.novelty) }
+            concepts_map = @concepts.values.map do |c|
+              { id: c.concept_id, type: :concept, score: 0.0, label: :n_a, domain: c.domain }
             end
-            { success: true, distribution: dist, total: @seeds.size }
+            {
+              seeds:              seeds_map,
+              concepts:           concepts_map,
+              avg_seed_novelty:   avg_values(@seeds.values.map(&:novelty_score)),
+              high_novelty_seeds: @seeds.values.count(&:novel?)
+            }
+          end
+
+          def genesis_rate(**)
+            return { rate: 0.0, total_events: 0 } if @genesis_events.empty?
+
+            oldest        = @genesis_events.min_by { |e| e[:born_at] }[:born_at]
+            elapsed_hours = [(Time.now.utc - oldest) / 3600.0, 1.0].max
+            rate          = @genesis_events.size / elapsed_hours
+            { rate:          rate.round(10),
+              total_events:  @genesis_events.size,
+              elapsed_hours: elapsed_hours.round(4) }
+          end
+
+          def most_adopted(**)
+            return nil if @concepts.empty?
+
+            @concepts.values.max_by(&:adoption_count)&.to_h
+          end
+
+          def orphan_concepts(**)
+            @concepts.values.select(&:orphan?).map(&:to_h)
           end
 
           def genesis_report(**)
-            avg_nov = @seeds.empty? ? 0.0 : (@seeds.values.sum(&:novelty).round(10) / @seeds.size).round(6)
-            avg_via = @seeds.empty? ? 0.0 : (@seeds.values.sum(&:viability).round(10) / @seeds.size).round(6)
-            fertile = (avg_nov * 0.5 + avg_via * 0.5).round(6)
-
             {
-              success:            true,
-              total_seeds:        @seeds.size,
-              viable_count:       @seeds.values.count(&:viable?),
-              novel_count:        @seeds.values.count(&:novel?),
-              truly_novel_count:  @seeds.values.count(&:truly_novel?),
-              crystallized_count: @seeds.values.count(&:crystallized?),
-              average_novelty:    avg_nov,
-              average_viability:  avg_via,
-              emergence_events:   @emergence_events.size,
-              fertility_score:    fertile,
-              fertility_label:    fertility_label(fertile),
-              seeds_by_type:      @seeds.values.group_by(&:concept_type).transform_values(&:size)
+              seeds:                @seeds.size,
+              concepts:             @concepts.size,
+              genesis_events:       @genesis_events.size,
+              genesis_rate:         genesis_rate,
+              orphan_count:         orphan_concepts.size,
+              most_adopted:         most_adopted,
+              avg_seed_novelty:     avg_values(@seeds.values.map(&:novelty_score)),
+              avg_concept_maturity: avg_values(@concepts.values.map(&:maturity)),
+              domains_active:       active_domains
             }
           end
 
           private
 
-          def fertility_label(score)
-            Constants::FERTILITY_LABELS.find { |range, _| range.cover?(score) }&.last || :barren
+          def cross_pollinate_guard(seed_id_a, seed_id_b)
+            return { cross_pollinated: false, reason: :seed_a_not_found } unless @seeds[seed_id_a]
+            return { cross_pollinated: false, reason: :seed_b_not_found } unless @seeds[seed_id_b]
+            return { cross_pollinated: false, reason: :capacity_exceeded } if @seeds.size >= MAX_SEEDS
+
+            nil
           end
 
-          def record_emergence(seed:, trigger_domains:, emergence_strength:)
-            event = EmergenceEvent.new(
-              concept_seed_id:    seed.id,
-              trigger_domains:    trigger_domains,
-              emergence_strength: emergence_strength
+          def plant_cross_child(seed_a, seed_b, child_novelty)
+            combined_viability = ((seed_a.viability + seed_b.viability) / 2.0).round(10)
+            plant(
+              raw_material:          (seed_a.raw_material + seed_b.raw_material).uniq,
+              domain:                pick_domain(seed_a.domain, seed_b.domain, child_novelty),
+              germination_potential: DEFAULT_GERMINATION + GERMINATION_BOOST,
+              novelty_score:         child_novelty,
+              viability:             combined_viability
             )
-            @emergence_events << event
-            event
           end
 
-          def prune_seeds!
-            overflow = @seeds.size - MAX_SEEDS
-            return if overflow <= 0
+          def compute_viability(seed)
+            material_factor  = [seed.raw_material.size / 5.0, 1.0].min
+            novelty_factor   = seed.novelty_score
+            potential_factor = seed.germination_potential
+            ((material_factor * 0.3) + (novelty_factor * 0.4) + (potential_factor * 0.3)).clamp(0.0, 1.0).round(10)
+          end
 
-            ids_to_prune = @seeds.min_by(overflow) { |_, s| s.novelty }.map(&:first)
-            ids_to_prune.each { |id| @seeds.delete(id) }
+          def cross_novelty(score_a, score_b)
+            base    = [score_a, score_b].max
+            synergy = (score_a - score_b).abs * 0.5
+            (base + synergy + GERMINATION_BOOST).clamp(0.0, 1.0).round(10)
+          end
+
+          def pick_domain(domain_a, domain_b, novelty)
+            return :emergent if novelty >= 0.8
+            return domain_a  if domain_a == domain_b
+
+            novelty >= 0.6 ? :abstract : domain_a
+          end
+
+          def avg_values(values)
+            return 0.0 if values.empty?
+
+            (values.sum / values.size.to_f).round(10)
+          end
+
+          def active_domains
+            all_domains = @seeds.values.map(&:domain) + @concepts.values.map(&:domain)
+            all_domains.tally
+          end
+
+          def record_genesis_event(concept:, seed:)
+            @genesis_events << {
+              concept_id: concept.concept_id,
+              name:       concept.name,
+              domain:     concept.domain,
+              seed_id:    seed.seed_id,
+              born_at:    concept.born_at
+            }
           end
         end
       end
